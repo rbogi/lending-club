@@ -1,0 +1,594 @@
+---
+title: "Regression Model"
+output: github_document
+---
+# Assignment
+Given the [dataset] (https://moodle.fhnw.ch/mod/resource/view.php?id=1326059) we had to come up with a regression model to calculate the optimum interest rate for a loan application. 
+
+# Purpose of the document
+This a walk-through of all the steps our team has taken to establish the regression model.
+
+# Stages
+```{r}
+set.seed(1)
+```
+
+## Setup libraries 
+```{r}
+# define used libraries
+libraries_used <- 
+  c("readr","plyr" ,"dplyr", "ggplot2", "scales", "tidyverse",
+    "corrplot", "caret", "DescTools","reshape2","Hmisc","gridExtra",
+    "leaps","boot")
+#Needed for R Knitting
+library(reshape2) 
+library(ggplot2)
+library(dplyr)
+library(DescTools) 
+library(corrplot)
+library(Hmisc) 
+library(leaps)
+library(boot) 
+
+# check missing libraries
+libraries_missing <- 
+  libraries_used[!(libraries_used %in% installed.packages()[,"Package"])]
+# install missing libraries
+if(length(libraries_missing)) install.packages(libraries_missing)
+```
+
+## Import the dataset
+```{r}
+path <- "C:\\Users\\raczb\\OneDrive\\Documents\\FHNW\\Data Science\\Project\\regression_train_loan\\regression_train_loan.csv"
+#blank values are automatically marked as NA
+loanclub_data <- read.csv(path,na.strings = c("", "NA"))
+head(loanclub_data,3)
+dim(loanclub_data) # 798641 rows; 74 attributes + 1 output variable (int_rate)
+```
+
+## Pre-processing
+
+Real-world data is inevitably dirty, incomplete, inconsistent, lacking in certain behaviors or trends, and is likely to contain many errors. Data pre-processing consists of a series of steps to transform raw data derived from data extraction into a “clean” and “tidy” dataset prior to statistical analysis. It is crucial in any data mining process as it directly impact success rate of the project. Research says that data scientists spend around 80% of their time only on preparing the data for processing.
+The general steps in data pre-processing:
+
+  - “Data cleaning”—This step deals with missing data, noise, outliers, and duplicate or incorrect records while minimizing introduction of bias into the database. 
+  - “Data integration”—Extracted raw data can come from heterogeneous sources or be in separate datasets. This step reorganizes the various raw datasets into a single dataset that contain all the information required for the desired statistical analyses.
+  - “Data transformation”—This step translates and/or scales variables stored in a variety of formats or units in the raw data into formats or units that are more useful for the statistical methods that the researcher wants to use.
+  - “Data reduction”—This step removes redundant records and variables, as well as reorganizes the data in an efficient and “tidy” manner for analysis.
+
+In present work all the steps except data integration are performed.
+
+### DESCRIPTIVE DATA SUMMARIZATION
+
+Descriptive data summarization provides an overall picture of our data. In order to be able to do a successful pre-processing and at a later stage perform the learning it is essential to have a good understanding of our data. To learn more about the data characteristics usually the following measures are used:
+
+  - Measuring the Central Tendency (mean, median, mode)
+  - Measuring the Dispersion of Data (range, IQR, quartiles, boxplots, variance, STD )
+  - Graphic Displays of Basic Descriptive Data Summaries (histogram, Q-Q plot, Scatter-plot)
+  - Correlation Analysis (Pearson’s product moment coefficient)
+  
+In present work these steps are performed simultaneously with data pre-processing in cycles.
+```{r}
+summary(loanclub_data)
+```
+
+### DATA REDUCTION - KNOWLEDGE BASED FEATURE SELECTION
+First apply knowledge based attribute subset selection to check the relevance of the 74 attributes. Too many input variables could increase the variance and weaken the interpretability of our regression model therefore irrelevant, weakly relevant or redundant attributes will be removed in this stage.
+
+* Removing IDs, desc, url since these have no impact on the interest rate (redundant/lack of information) -> 69 attributes left out of 74
+```{r}
+lc_cleaned <- subset(loanclub_data, select = -c(X,id,member_id,desc,url)) # -5 variables
+dim(lc_cleaned)
+```
+
+* Removing the following 14 variables since they are not given prior approval of the loan, thus they couldn't be used as predictors of the output (int_rate) -> 54 attributes left out of 74
+```{r}
+lc_cleaned <- subset(lc_cleaned, select = -c(loan_status,
+                                             pymnt_plan,
+                                             next_pymnt_d,
+                                             last_pymnt_d,
+                                             last_credit_pull_d,
+                                             out_prncp,
+                                             out_prncp_inv,
+                                             recoveries,
+                                             collection_recovery_fee,
+                                             total_pymnt,
+                                             total_pymnt_inv,
+                                             total_rec_prncp,
+                                             total_rec_int,
+                                             total_rec_late_fee,
+                                             last_pymnt_amnt)) # -15 variables
+dim(lc_cleaned)
+```
+
+* Removing funded_amnt,funded_amnt_inv because they have a very similar distribution and high collinearity with the loan_amount -> 52 attributes left out of 74
+```{r}
+#checking distribution with frequency histograms -> looks highly similar for all 3 attributes
+lc_plot_amnt <- subset(lc_cleaned, select = c(funded_amnt,funded_amnt_inv,loan_amnt))
+lc_plot_amnt_melt <- melt(lc_plot_amnt) # creating a molten dataframe with 2 attributes-> variable: names of the original attributes; value: actual values of the original attributes
+ggplot(lc_plot_amnt_melt, aes(x=value, fill=variable)) +
+  geom_histogram(binwidth=500)+
+  facet_grid(variable~.)
+```
+
+
+```{r}
+#correlation analysis with Pearson’s product moment coefficient -> shows high multicollenearity between the 3 variables
+knitr::kable(cor(lc_plot_amnt))
+```
+
+
+```{r}
+# based on domain knowledge, loan_amnt is the most meaningful predictor for int_rate from the above 3 -> dropping funded_amnt and funded_amnt_inv
+lc_cleaned <- subset(lc_cleaned, select = -c(funded_amnt,
+                                             funded_amnt_inv)) # -2 variables
+dim(lc_cleaned) 
+
+```
+#### REMOVING VARIABLES WITH ONE OR TOO MANY VALUES TO BE RELEVANT
+
+* Removing policy_code as it has only 1 unique value (all 5 number summary values are the same), therefore can not be used as a meaningful predictor -> 52 attributes left out of 74
+```{r}
+# checking 5 number summary -> policy_code is a constant -> it has no prediction power
+summary(lc_cleaned$policy_code)
+```
+```{r}
+#removing policy_code as it is a constant
+lc_cleaned <- within(lc_cleaned, rm (policy_code)) # -1 variable
+dim(lc_cleaned) 
+```
+ 
+* Dropping categorical attributes where unique values >50 as categorical variables with a high number of different values tend to do overfitting -> 46 attributes left out of 74
+```{r}
+# checking categorical attributes -> how many unique values they have
+meta_data <- funModeling::df_status(lc_cleaned, print_results = FALSE)
+meta_data_unique <- meta_data%>%
+  filter(type == 'factor')
+meta_data_unique <- subset(meta_data_unique, select = c(variable, type,
+                                             unique))
+knitr::kable(meta_data_unique[order(-meta_data_unique$unique),])
+```
+
+```{r}
+# removing categorical variables with more than 50 levels
+lc_cleaned <- subset(lc_cleaned, select = -c(emp_title,title,
+                                             zip_code,earliest_cr_line,
+                                             issue_d,addr_state)) # -6 variables
+dim(lc_cleaned)
+```
+
+### DATA CLEANING
+Data is cleansed through processes such as filling in missing values or deleting rows with missing data, smoothing the noisy data, or resolving the inconsistencies in the data.
+
+#### HANDLING NAs
+##### Variables with over 70% of missing values
+As a rule of thumb, when over 70% of the values are missing in a variable, dropping the attribute should be considered. The provided data set contains the following 19 attributes which have more than 70% missing values and have been removed:
+```{r}
+# checking missing value statistics -> show the attributes where >70% of NA's
+# q_na: quantity of NAs; p_na: NA in percentage
+meta_data <- funModeling::df_status(lc_cleaned, print_results = FALSE)
+meta_data_na70 <- meta_data%>%
+  filter(p_na > 70)
+meta_data_na70 <- subset(meta_data_na70, select = c(variable, q_na,
+                                             p_na))
+knitr::kable(meta_data_na70[order(-meta_data_na70$p_na),])
+```
+
+
+Removing variables with more of 70% missing values -> 26 attributes left out of 74
+```{r}
+lc_cleaned <- lc_cleaned[, -which(colMeans(is.na(lc_cleaned)) > 0.7)] # -19 variable
+dim(lc_cleaned)
+```
+##### Handling remaining NAs - Simple imputation
+
+```{r}
+# checking remaining missing values
+# q_na: quantity of NAs; p_na: NA in percentage
+meta_data <- funModeling::df_status(lc_cleaned, print_results = FALSE)
+meta_data_na <- meta_data%>%
+  filter(q_na > 0)
+meta_data_na <- subset(meta_data_na, select = c(variable, q_na,
+                                             p_na))
+knitr::kable(meta_data_na[order(-meta_data_na$q_na),])
+```
+
+* With 0s because it could represent something that never happened.
+```{r}
+lc_cleaned$delinq_2yrs[is.na(lc_cleaned$delinq_2yrs)] <- 0
+lc_cleaned$inq_last_6mths[is.na(lc_cleaned$inq_last_6mths)] <- 0
+lc_cleaned$mths_since_last_delinq[is.na(lc_cleaned$mths_since_last_delinq)] <- 0
+lc_cleaned$acc_now_delinq[is.na(lc_cleaned$acc_now_delinq)] <- 0
+```
+
+* With the median because the entry might have been forgotten when entered. 
+```{r}
+
+annual_inc_median <- median(lc_cleaned$annual_inc, na.rm = TRUE)  
+lc_cleaned$annual_inc[is.na(lc_cleaned$annual_inc)] <- annual_inc_median
+
+open_acc_median <- mean(lc_cleaned$open_acc, na.rm = TRUE)  
+lc_cleaned$open_acc[is.na(lc_cleaned$open_acc)] <- open_acc_median
+
+revol_util_median <- median(lc_cleaned$revol_util, na.rm = TRUE)  
+lc_cleaned$revol_util[is.na(lc_cleaned$revol_util)] <- revol_util_median
+
+total_acc_median <- median(lc_cleaned$total_acc, na.rm = TRUE)  
+lc_cleaned$total_acc[is.na(lc_cleaned$total_acc)] <- total_acc_median
+
+tot_cur_bal_median <- median(lc_cleaned$tot_cur_bal, na.rm = TRUE)  
+lc_cleaned$tot_cur_bal[is.na(lc_cleaned$tot_cur_bal)] <- tot_cur_bal_median
+
+total_rev_hi_lim_median <- median(lc_cleaned$total_rev_hi_lim, na.rm = TRUE)  
+lc_cleaned$total_rev_hi_lim[is.na(lc_cleaned$total_rev_hi_lim)] <- total_rev_hi_lim_median
+
+pub_rec_median <- median(lc_cleaned$pub_rec, na.rm = TRUE)  
+lc_cleaned$pub_rec[is.na(lc_cleaned$pub_rec)] <- pub_rec_median
+
+collections_12_mths_ex_med_median <- median(lc_cleaned$collections_12_mths_ex_med, na.rm = TRUE)  
+lc_cleaned$collections_12_mths_ex_med[is.na(lc_cleaned$collections_12_mths_ex_med)] <- collections_12_mths_ex_med_median
+
+tot_coll_amt_median <- median(lc_cleaned$tot_coll_amt, na.rm = TRUE)  
+lc_cleaned$tot_coll_amt[is.na(lc_cleaned$tot_coll_amt)] <- tot_coll_amt_median
+
+sum(is.na(lc_cleaned)) # NAs after handling, should be 0
+```
+* We noted that 'emp_length' variable contains NAs stored as "n/a" which was not detected by R. As 'emp_length' is a categorical variable instead of transforming those "n/a"-s into a "NA" (which would be automatically recognized by R) we handle them later, in the variable transformation step.
+```{r}
+# showing 'emp_length' levels
+print(emp_length_table <- table(lc_cleaned$emp_length))
+```
+
+### DATA TRANSFORMATION - TRANSFORMING QUALITATIVE VARIABLES
+As some learning algorithms can not process specific variable types (e.g. categorical), these variable types have to be translated into a more useful format. Variables are classified as follows:
+
+* Qualitative (attribute, or categorical) variable: a variable that categorizes or describes an element of a population. Arithmetic operations, such as addition and averaging are not meaningful
+  + Nominal variable: categorizes (or describes, or names) an element of a population.
+  + Ordinal variable: incorporates an ordered position, or ranking.
+
+* Quantitative (numerical) variable: a variable that quantifies an element of a population. Arithmetic operations such as addition and averaging are meaningful
+  + Discrete variable: can assume a countable number of values. Intuitively, a discrete variable can assume values corresponding to isolated points along a line interval. That is, there is a gap between any two values.
+  + Continuous variable: can assume an uncountable number of values. Intuitively, a continuous variable can assume any value along a line interval, including every possible value between any two values.
+  
+Our regression model can only process numerical data, thus we had to examine the categorical data in our dataset. We also had to consider that sometimes R can not automatically recognize the correct variable type, therefore first we checked how our variables were classified by R.
+```{r}
+# q_na: quantity of NAs; p_na: NA in percentage
+meta_data <- funModeling::df_status(lc_cleaned, print_results = FALSE)
+meta_data_vartype <- subset(meta_data, select = c(variable, type,
+                                             unique))
+knitr::kable(meta_data_vartype[order(meta_data_vartype$type, meta_data_vartype$unique),])
+```
+
+* 'term' attribute was classified as categorical variable however it contains numerical data stored in text format. Thus we translated it into numerical data.
+```{r}
+#Encoding 'term': " 36 months" -> 36, " 60 months" ->60
+print(term_table <- table(lc_cleaned$term))
+lc_cleaned$term <- ifelse(lc_cleaned$term==" 60 months",60,36)
+lc_cleaned$term <- as.integer(lc_cleaned$term) #Converting to integer
+print(term_table <- table(lc_cleaned$term))
+```
+* 'initial_list_status' and 'application_type' are nominal variables, without natural order, therefore we transformed them into dummy variables.
+
+```{r}
+#Encoding 'initial_list_status': "f" -> 0, "w" -> 1
+print(initial_list_status_table <- table(lc_cleaned$initial_list_status)) #shows the variable levels with the value distribution
+lc_cleaned$initial_list_status <- ifelse(lc_cleaned$initial_list_status=="w",1,0)
+lc_cleaned$initial_list_status <- as.integer(lc_cleaned$initial_list_status) #Converting to integer
+print(initial_list_status_table <- table(lc_cleaned$initial_list_status))#shows the variable levels with the value distribution
+
+#Encoding 'application_type': "JOINT" -> 0, "INDIVIDUAL" -> 1
+print(application_type_table <- table(lc_cleaned$application_type)) #shows the variable levels with the value distribution
+lc_cleaned$application_type <- ifelse(lc_cleaned$application_type=="INDIVIDUAL",1,0)
+lc_cleaned$application_type <- as.integer(lc_cleaned$application_type) #Converting to integer
+print(application_type_table <- table(lc_cleaned$application_type)) #shows the variable levels with the value distribution
+```
+* 'verification_status' and 'emp_length' are ordinal variables, with an underlying natural order, therefore we transformed them into distinct numerical data.
+
+```{r}
+#Encoding 'verification_status': "Not Verified" -> 0, "Source Verified"(source of the reported income is verified) -> 0.5, "Verified"(source+size of the reported income is verified) -> 1
+print(verification_status_table <- table(lc_cleaned$verification_status))  #shows the variable levels with the value distribution
+lc_cleaned$verification_status <- factor(lc_cleaned$verification_status, levels = c('Not Verified', 'Source Verified', 'Verified'), labels= c(0,0.5,1))
+lc_cleaned$verification_status <- as.numeric(as.character(lc_cleaned$verification_status))
+print(verification_status_table <- table(lc_cleaned$verification_status)) #shows the variable levels with the value distribution
+
+#Encoding 'emp_length': "n/a" -> 0, "< 1 year" -> 0.5, "1 year" -> 1..."10+ years" -> 10
+print(emp_length_table <- table(lc_cleaned$emp_length)) #shows the variable levels with the value distribution
+lc_cleaned$emp_length <- factor(lc_cleaned$emp_length, levels = c('n/a', '< 1 year', '1 year','2 years', '3 years','4 years','5 years','6 years','7 years','8 years','9 years','10+ years'), labels= c(0,0.5,1,2,3,4,5,6,7,8,9,10))
+lc_cleaned$emp_length <- as.numeric(as.character(lc_cleaned$emp_length))
+print(emp_length_table <- table(lc_cleaned$emp_length)) #shows the variable levels with the value distribution
+```
+* there are 4 remaining categorical attributes:
+  + 'grade' and 'sub_grade' are ordinal variables,
+  + 'purpose' and 'home_ownership' are nominal variables without natural order.
+
+After plotting them against the int_rate we decided to keep and encode only the 2 ordinal variables ('grade' and 'subgrade') as they looked more significant - there is a strong linear relation between those two attributes and the output variable 'int_rate'.
+Thus 'purpose' and 'home_ownership' got dropped (they have proven to be much less relevant variables and encoding them into dummy variables would have largely increased the attribute number - which wouldn't be preferable for a multilinear regression model).
+
+```{r}
+#Plot 'purpose', 'home_ownership', 'sub_grade' and 'grade' against 'int_rate'
+ggplot(lc_cleaned) + geom_boxplot(mapping = aes(x = purpose, y = int_rate)) + theme(axis.text.x = element_text(angle = 90))
+ggplot(lc_cleaned) + geom_boxplot(mapping = aes(x = home_ownership, y = int_rate))
+ggplot(lc_cleaned) + geom_boxplot(mapping = aes(x = sub_grade, y = int_rate))
+ggplot(lc_cleaned) + geom_boxplot(mapping = aes(x = grade, y = int_rate))
+
+#Drop the less relevant attributes: 'purpose', 'home_ownership' -> 24 attributes left
+lc_cleaned <- subset(lc_cleaned, select = -c(home_ownership,
+                                             purpose)) # -2 variables
+dim(lc_cleaned)
+
+#Transform 'grade' and 'subgrade' ordinal variables 
+temp <- factor(lc_cleaned$grade)
+lc_cleaned$grade <- as.integer(temp)
+
+temp <- factor(lc_cleaned$sub_grade)
+lc_cleaned$sub_grade <- as.integer(temp)
+```
+
+
+### DATA CLEANING 
+#### HANDLING OUTLIERS
+During data analysis phase we noticed some outliers, that some nurses declared making more 9 Million $ followed by truck driver with 8.9 Million. We found that very suspicious and wanted to delete the 5% lowest and highest values. But not far behind where plausible entries, so we decided to find more refined ways to handle outliers.
+We tried handling the outliers with the [IQR method](https://www.r-bloggers.com/2020/01/how-to-remove-outliers-in-r/), unfortunately it would have modified for more then >122K observations. This means that the data was skewed. 
+For us this had a too big reduction on the number of observations, we thus decided to use the [winsorization technique](https://www.r-bloggers.com/2011/06/winsorization/). This helps keeping all the observations and just replaces the outlier variables with the median value. We left the parameters by default which adapt the 5% lowest and highest values of each variables like we wanted to do at the begining.
+```{r}
+#winzorization
+lc_cleaned <- Winsorize(lc_cleaned, na.rm=TRUE)
+```
+
+
+### DATA REDUCTION - FEATURE SELECTION BASED ON CORRELATION PLOTS
+
+We calculated and visualized the correlation coefficient (Pearson’s product moment coefficient) for the remaining attributes. The correlation coefficient shows us if there is a relationship between the variables (higher number indicates stronger relationship). A high value is desired between a predictor and the output variable however not between two predictors. A high correlation coefficient value between two predictors indicates multicollinearity (which could make our model unstable) in this case removing one of the attributes must be considered.
+
+* As at this stage we still had a large number of attributes first we created a subset of predictors containing variables related to credit history (based on domain knowledge) and assesed them. We dropped the variables which had low or no relationship to the output (int_rate).
+```{r}
+#creating a subset of predictors related to credit history and plot them against 'int_rate'.
+lc_CreditHistory <- subset(lc_cleaned, select = c(int_rate,delinq_2yrs,mths_since_last_delinq,pub_rec,revol_util,collections_12_mths_ex_med,acc_now_delinq,tot_cur_bal,inq_last_6mths,open_acc,revol_bal,total_acc,tot_coll_amt,total_rev_hi_lim
+))
+corrplot.mixed(cor(lc_CreditHistory),lower = "number", lower.col = "red", number.cex = .5, tl.cex = .6, upper = "circle",tl.col = "black", tl.pos ="lt")
+```
+```{r}
+#based on the correlogram we dropped the irrelevant attributes
+lc_cleaned <- subset(lc_cleaned, select = -c(delinq_2yrs,
+                                             mths_since_last_delinq,
+                                             pub_rec,
+                                             collections_12_mths_ex_med,
+                                             acc_now_delinq,
+                                             tot_cur_bal,
+                                             open_acc,
+                                             revol_bal,
+                                             total_acc,
+                                             tot_coll_amt)) # -10 variables
+dim(lc_cleaned)
+```
+
+* We plotted all the remaining attributes against the output variable, interest rate. After looking at the correlation matrix we can see which are the variables having very little influence on the interest rates. Since these variables have no strong prediction power we can delete them from the data set.
+```{r}
+#creating the correlogram with the remaining variables
+corrplot.mixed(cor(lc_cleaned),lower = "number", lower.col = "red", number.cex = .5, tl.cex = .6, upper = "circle",tl.col = "black", tl.pos ="lt")
+```
+```{r}
+#dropping variables with low or no prediction power
+lc_cleaned <- subset(lc_cleaned, select = -c(dti,
+                                             emp_length,
+                                             application_type,
+                                             annual_inc,
+                                             initial_list_status)) # -5 variables
+dim(lc_cleaned)
+```
+* As expected we could see from the correlogram above that grade has a high collinearity with sub grade and so does loan amount with installment. 
+Subgrade and loan amount are by a small margin better predictors then grade and installment, therefore we keep those and drop the other two attributes.
+
+* We where quite surprised to see that the correlation between annual_inc and the int_rate was so low. For us there was maybe an inference with other predictors so we did a separate model with annual_inc (sub_grade, inq_last_6mths, evol_util, total_rev_hi_lim, term, annual_inc) to be sure. In the end the metrics (BIC, AIC, r^2) where worse than the model we selected in this document.
+```{r}
+#creating frequency histogram for grade and sub_grade
+lc_plot_grade <- subset(lc_cleaned, select = c(sub_grade,grade))
+hist.data.frame(lc_plot_grade)
+
+#calculating correlation matrices for 'grade'-'sub_grade' and 'loan_amnt'-'installment' 
+lc_grade_subgrade <- subset(lc_cleaned, select = c(sub_grade,grade,int_rate))
+knitr::kable(cor(lc_grade_subgrade))
+lc_installment_amount <- subset(lc_cleaned, select = c(loan_amnt,installment,int_rate))
+knitr::kable(cor(lc_installment_amount))
+
+#dropping 'grade' and 'installment'
+lc_cleaned <- subset(lc_cleaned, select = -c(grade,installment)) # -2 variables
+dim(lc_cleaned)
+
+corrplot.mixed(cor(lc_cleaned),lower = "number", 
+               upper = "circle",tl.col = "black", tl.pos ="lt")
+```
+
+## Choosing and validating the best model
+
+### Creating training and test data set
+We have chosen to use 80% of our data as a training and 20% as test set and split the data accordingly.
+```{r}
+set.seed(1)
+data_set_size = floor(nrow(lc_cleaned)*0.80)
+#generate a random sample of "data_set_size" index
+index <- sample(1:nrow(lc_cleaned), size = data_set_size )
+#assign the data to correct data sets
+training <- lc_cleaned[index,]
+testing <- lc_cleaned[-index,]
+
+#Then change them into tibbles
+training <- as_tibble(training)
+testing <- as_tibble(testing)
+
+#Export the datasets
+write.csv(training, "regressionTrainigDataSet.CSV", row.names=FALSE)
+write.csv(testing, "regressionTestDataSet.CSV", row.names=FALSE)
+```
+
+### Best subset selection
+From our remaining attributes we would like to create a subset of relevant predictors of 'int_rate' and fit a multilinear regression model as we could observe a very strong linear correlation between 'sub_grade' (our main predictor) and 'int_rate'.
+Obviously, Best Subset Selection method can be very computationally intensive therefore not recommended for cases with many attributes. But after the above executed preprocessing and knowledge based feature selection steps we are left with only 7 predictors, thus we have chosen this method (and applying a multi-step approach also reduced the complexity).
+
+The Best Subset Selection Algorithm consists of 3 Steps:
+1. Initializing the Null Model
+2. For each fixed model size k, choose the best model using RSS (residual sum of squares)
+3. Choose the best k using :
+     - one of AIC, BIC, Cp, Adjusted R2 or
+     - cross - validation (cv) error
+steps 1 & 2 is done by function regsubsets(). Chooses best model using RSS, but does not select the best model size k
+step 3, regsubset()function does not work & needs to be done manually
+
+#### Choosing the best predictor subset per model size k (Algorithm Steps 1 & 2)
+##### Multi-step approach
+We set the biggest model size to max (in our case it means 7 predictors) and examine what is the best subset selection for each model size. For the evaluation of the subsets the method can use RSS ('rss') or R-squared ('rsq') as k-size is fixed for each subset selection. E.g. for model size 1 'sub_grade' performed best (as we suspected), for model size 2 'sub_grade' and 'revol_util'.
+```{r}
+#nvmax specifies the maximum size of subsets to examine
+#we have 7 predictors including int_rate (we haven't excluded any of them manually)
+sets <- regsubsets(int_rate ~.,training, nvmax= 7)
+#outputs the best set of variables for each model size according to RSS
+#an asterisk indicates that a given variable is included in the corresponding model
+(sets_summary <- summary(sets))
+```
+#### Choosing the best model size k (Algorithm Step 3)
+##### Using AdjR2, Cp & BIC to find the best model size 
+We could use RSS ('rss') or R-squared ('rsq') in Step 2 as size k was fixed for subset selection but when we would like to identify the best model size they are not useful metrics anymore as they monotonically grow with k.
+In Step3 we can either use other metrics for comparison (AdjR2, Cp & BIC) or cross-validation prediction error to determine the best model size.
+
+First we use the relevant metrics to compare our models: Adjusted R-squared (adjr2 -> the bigger the better), Bayesian information criterion (cp -> the smaller the better) & BIC (equivalent to AIC for linear regression -> the smaller the better).
+```{r}
+names(sets_summary) # [1] "which", "rsq", "rss", "adjr2", "cp", "bic", "outmat", "obj"
+#rss and rsq are not useful in Step3 because they monotonically growing with k
+#-> use adjr2, cp and bic instead 
+data.frame("adjr2"=sets_summary$adjr2, "cp"=sets_summary$cp, "bic"=sets_summary$bic) 
+#which.max (or.min accordingly) returns the index of the vector sets_summary$... that stores the highest value
+#adjr2 -> the larger the better
+#note 
+(adjr2.max <-which.max(sets_summary$adjr2)) # model 7
+#cp -> the smaller the better
+(cp.min <- which.min(sets_summary$cp)) # model 7
+#bic -> the smaller the better
+(bic.min <- which.min(sets_summary$bic))  # model 7
+```
+If we vizualise the results for our 3 metrics (AdjR2, Cp & BIC) we can see the same pattern, indicating the same order of predictor importance for our models. Which we interpret as a good sign for our selected modelsize of 7.
+```{r}
+par(mfrow=c(1,3))
+  plot(sets, scale="adjr2")
+  plot(sets, scale="Cp")
+  plot(sets, scale="bic")
+par(mfrow=c(1,1))  
+```
+
+Alternative visualisaton for Steps 2 (use metrics AdjR2, Cp & BIC for comparison of our models)
+```{r}
+steps <- 1:7
+#  Plot with Adjusted R2 -> the larger the better
+p1 <- ggplot() +
+      geom_point(aes(x = steps, y = sets_summary$adjr2), color = "black", size = 2) +
+      geom_line(aes(x = steps, y =sets_summary$adjr2), color = "black", size = 0.5) +
+      geom_point(aes(x = adjr2.max, y = sets_summary$adjr2[adjr2.max]), color= "black", size = 7, shape = 4) +
+      xlab("Number of Predictors") + ylab("Adjusted R Square")
+# Plot with Cp -> the smaller the better
+p2 <- ggplot() +
+  geom_point(aes(x = steps, y = sets_summary$cp), color = "blue", size = 2) +
+  geom_line(aes(x = steps, y = sets_summary$cp), color = "blue", size = 0.5) +
+  geom_point(aes(x = cp.min, y = sets_summary$cp[cp.min]), color= "blue", size = 7, shape = 4) +
+  xlab("Number of Predictors") + ylab("Cp")
+# Plot with BIC -> the smaller the better
+p3 <- ggplot() +
+  geom_point(aes(x = steps, y = sets_summary$bic), color = "red", size = 2) +
+  geom_line(aes(x = steps, y = sets_summary$bic), color = "red", size = 0.5) +
+  geom_point(aes(x = bic.min, y = sets_summary$bic[bic.min]), color= "red", size = 5, shape = 4) +
+  xlab("Number of Predictors") + ylab("BIC")
+
+#dev.off() #incase, error for invalid graphics state
+library(gridExtra) 
+grid.arrange(p1, p2, p3, nrow = 3)
+```
+
+##### Using cross-validation to find the best model size (Algorithm Step 3)
+In the previous section we applied the Best Subset Selection algorithm on the training data set together with the metrics of Adjusted R2, Cp and BIC.
+Another possibility to evaluate the different k-size models of ours (from Step 2) is to use cross validation error.
+It is much better to use cross validation error, because it is a stable form of test error to fit all models.
+```{r}
+#use glm function instead of regsubset function
+#->glm provides us the function cv.glm to apply cross validation easily
+#create the subsets based on Step2
+glm1 <- glm(int_rate ~ sub_grade, data = training)
+glm2 <- glm(int_rate ~ sub_grade + revol_util, data = training)
+glm3 <- glm(int_rate ~ sub_grade + verification_status + total_rev_hi_lim, data = training)
+glm4 <- glm(int_rate ~ sub_grade + verification_status + revol_util + total_rev_hi_lim, data = training)
+glm5 <- glm(int_rate ~ sub_grade + verification_status + revol_util + total_rev_hi_lim + inq_last_6mths, data = training)
+glm6 <- glm(int_rate ~ sub_grade + inq_last_6mths + revol_util + total_rev_hi_lim + term + verification_status, data = training)
+glm7 <- glm(int_rate ~ sub_grade + inq_last_6mths + revol_util + total_rev_hi_lim + term + verification_status + loan_amnt, data = training)
+```
+We do conduct 10 fold cross validation and calulate the cross validation error for each of the above created models (10 is often used and it is arbitrary) on the training data.
+```{r}
+#use cv.glm function to calculate the crossvalidation error
+set.seed(1)
+cv.err.glm1 <- cv.glm(training, glm1, K = 10)
+cv.err.glm2 <- cv.glm(training, glm2, K = 10)
+cv.err.glm3 <- cv.glm(training, glm3, K = 10)
+cv.err.glm4 <- cv.glm(training, glm4, K = 10)
+cv.err.glm5 <- cv.glm(training, glm5, K = 10)
+cv.err.glm6 <- cv.glm(training, glm6, K = 10)
+cv.err.glm7 <- cv.glm(training, glm7, K = 10)
+
+# Plot the CV error as a function of the number of predictors
+x <- 1:7
+(cv.err <- c(cv.err.glm1$delta[1], cv.err.glm2$delta[1], cv.err.glm3$delta[1], cv.err.glm4$delta[1],
+             cv.err.glm5$delta[1], cv.err.glm6$delta[1], cv.err.glm7$delta[1]))
+
+plot(cv.err ~ x)
+lines(cv.err ~x)
+```
+We can take a look at the model with the lowest cross-validation error.
+As we can see all the predictors are highly significant so based on that we should keep all of our 7 predictors.
+```{r}
+#Shows the model with the lowest error
+(cv.min <- which.min(cv.err)) # glm7
+cv.err[cv.min] #0.8368
+coef(sets,7)  #Inspect the coefficient estimates
+summary(glm7)
+```
+
+Compare all 4 metrics (AdjR2, Cp, BIC, cv - error) of all 7 models. We have also added the (min-max accuracy)[http://r-statistics.co/Linear-Regression.html] and Mean Absolute Percentage Error (MAPE) to confirm or not the fit between our selected model and the training data.
+```{r}
+data.frame("model" = c(1,2,3,4,5,6,7),
+           "cv-errors" = c(cv.err.glm1$delta[1],cv.err.glm2$delta[1], cv.err.glm3$delta[1],cv.err.glm4$delta[1], cv.err.glm5$delta[1],cv.err.glm6$delta[1], cv.err.glm7$delta[1]),
+           "adjR2" = c(sets_summary$adjr2[1],sets_summary$adjr2[2], sets_summary$adjr2[3], sets_summary$adjr2[4], sets_summary$adjr2[5], sets_summary$adjr2[6], sets_summary$adjr2[7]),
+           "cp"  = c(sets_summary$cp[1], sets_summary$cp[2], sets_summary$cp[3], sets_summary$cp[4], sets_summary$cp[5], sets_summary$cp[6], sets_summary$cp[7]),
+           "BIC" = c(sets_summary$bic[1], sets_summary$bic[2], sets_summary$bic[3], sets_summary$bic[4], sets_summary$bic[5],sets_summary$bic[6], sets_summary$bic[7]))
+
+coef(sets,6)  #Inspect the coefficient estimates of Model_6
+summary(glm6) #Summary of Model_6
+
+#Calculating Accuracy of our model (Model_6) with the training data
+distPred <- predict(glm6, training)
+actuals_preds <- data.frame(cbind(actuals=training$int_rate, predicted=distPred))
+head(actuals_preds)
+mean(apply(actuals_preds, 1, min) / apply(actuals_preds, 1, max)) # MinMax Accuracy 
+mean(abs((actuals_preds$predicted - actuals_preds$actuals))/actuals_preds$actuals)  #MeanAbsolutePercentageError (MAPE)
+
+save(glm6, file = "regressionModel.RDS") #Saving our chosen model
+```
+Based on the cv.errors and the above metrics, the Group decided to use Model_6. We decided not to go further with the 7th predictor because percentage reduction in cp, BIC and cv.errors on Model_7 is minimal compared with Model_6 (and adjR2 is flat after Model_6). We also want to keep our model as simple as possible to avoid overfitting and make interpretation easier.
+To confirm our interpretation we then used the min-max accuracy gave a "0.947" as a result which is a very good fit between our model and the training data. The MAPE is very low "0.05551" which is a very good sign of our accuracy.
+The  exclusion of “loan_amnt” did not significantly affect the model. We can imagine that loan amount can be a better predictor of interest rate in other cases, where there is a bigger range for loan amount (not only 500-35 000 USD like in our case), as in our case the maximum value (35 000 USD) is still quite low compared to e.g. a normal mortgage.
+
+The high t values and low p values of all the selected variables show that there is a very significant relationship between our predictors and the interest rate (therefore the null hypothesis can be rejected). 
+Variable 'sub_grade' has the strongest predictive power on interest rate.
+
+Model_6 was saved and used on the test data:
+
+```{r}
+#Calculating Accuracy of our model (Model_6) with the test data
+load(file="regressionModel.RDS")
+distPred_testing <- predict(glm6, newdata=testing)
+
+actuals_preds_testing <- data.frame(cbind(actuals=testing$int_rate, predicted=distPred_testing))
+head(actuals_preds_testing)
+mean(apply(actuals_preds_testing, 1, min) / apply(actuals_preds_testing, 1, max)) # MinMax Accuracy 
+mean(abs((actuals_preds_testing$predicted - actuals_preds_testing$actuals))/actuals_preds_testing$actuals)  #MeanAbsolutePercentageError (MAPE)
+```
+As reported above, Quantiles 1 and 3 appear to be evenly distributed from each other. The median value of deviance residuals is also very small. Both of these signals are encouraging on how well Model_6 predicts the interest rates with the test data.
+
+#Regression Model Conclusion
+And lastly we check again the min-max accuracy which is almost the same as the one we had for our training data : 0.9468144. The MeanAbsolutePercentageError (MAPE) is very low with : "0.05570271". This confirms the high accuracy of the model and it's low variance since the accuracy difference between training and test dataset is minimal.
+
+We can thus conclude that with our data pre-processing and predictor subset selection method which led us to this 6 predictors-model has given a good result.
