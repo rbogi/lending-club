@@ -1,0 +1,893 @@
+---
+title: "Classification Model"
+output: github_document
+---
+# Assignment
+Given the [dataset](https://moodle.fhnw.ch/mod/resource/view.php?id=1326059) we had to come up with a classification model to predict if a loan will be default or not. 
+
+# Purpose of the document
+This a walk-through of all the steps our team has taken to establish the classification model.
+
+# Stages
+
+## Setup librairies 
+```{r setup}
+set.seed(1)
+library(keras)
+library(tensorflow)
+library(caret)
+library(dplyr)
+library(Hmisc)
+library(dummies)
+library(psych)
+library(DescTools)
+```
+
+## Import the dataset
+```{r}
+setwd("C:\\Users\\raczb\\OneDrive\\Documents\\FHNW\\Data Science\\Project\\regression_train_loan")
+path <- "regression_train_loan.csv"
+#blank values are automatically marked as NA
+lc_data <- read.csv(path,na.strings = c("", "NA"))
+```
+## Pre-processing
+
+Real-world data is inevitably dirty, incomplete, inconsistent, lacking in certain behaviors or trends, and is likely to contain many errors. Data pre-processing consists of a series of steps to transform raw data derived from data extraction into a “clean” and “tidy” dataset prior to statistical analysis. It is crucial in any data mining process as it directly impact success rate of the project. Research says that data scientists spend around 80% of their time only on preparing the data for processing.
+The general steps in data pre-processing:
+
+  - “Data cleaning”—This step deals with missing data, noise, outliers, and duplicate or incorrect records while minimizing introduction of bias into the database. 
+  - “Data integration”—Extracted raw data can come from heterogeneous sources or be in separate datasets. This step reorganizes the various raw datasets into a single dataset that contain all the information required for the desired statistical analyses.
+  - “Data transformation”—This step translates and/or scales variables stored in a variety of formats or units in the raw data into formats or units that are more useful for the statistical methods that the researcher wants to use.
+  - “Data reduction”—This step removes redundant records and variables, as well as reorganizes the data in an efficient and “tidy” manner for analysis.
+
+In present work all the steps except data integration are performed.
+
+
+### DESCRIPTIVE DATA SUMMARIZATION
+
+Descriptive data summarization provides an overall picture of our data. In order to be able to do a successful pre-processing and at a later stage perform the learning it is essential to have a good understanding of our data. To learn more about the data characteristics usually the following measures are used:
+
+  - Measuring the Central Tendency (mean, median, mode)
+  - Measuring the Dispersion of Data (range, IQR, quartiles, boxplots, variance, STD )
+  - Graphic Displays of Basic Descriptive Data Summaries (histogram, Q-Q plot, Scatter-plot)
+  - Correlation Analysis (Pearson’s product moment coefficient)
+  
+In present work these steps are performed simultaneously with data pre-processing in cycles.
+
+```{r}
+dim(lc_data)
+summary(lc_data)
+```
+
+
+### DATA TRANSFORMATION & REDUCTION
+#### Concept hierarchy climbing and encoding of the dependent variable
+Our goal in the second assignment is to predict if a new customer will be able to fully pay back their loans using a classification method. As we can observe below, "loan_status" has 10 different levels (like "Charged Off" or "Late (16-30 days)"), but we have to concentrate only on the "concluded lends" in the data set, i.e., on all lends whose "loan_status" is not "Current". To this end, we need to filter out all observations where "loan_status" is "Current". From the remaining observations, we select where the "loan_status" is “Fully Paid” and encode it as 1. On the rest of the observations we apply concept hierarchy climbing and aggregate the remaining 8 levels as “Defaulted” and encode it as 0.
+We can see that our final 2 classes are unbalanced:
+  - "Fully Paid" (1): 186 885 observations
+  - "Defaulted" (0): 70 091 observations
+
+It could generate high cost for the Lending Club if we miss-classified the "Defaulted" as "Fully Paid" and based on that they would grant credit to this clientele - so we need to make sure to deliver high accuracy for the minority class, too.
+
+```{r}
+class(lc_data$loan_status) #it is factor
+#take a look at the value count of each level of loan_status
+print(loan_status_table <- table(lc_data$loan_status))
+#loan_status has 10 levels -> encode 'Fully Paid' as 1 and the rest as 0 with the exception of 'Current'. 
+#take a subset of the data without 'Current'
+lc_data_subset <- subset(lc_data, lc_data$loan_status != 'Current')
+#establish a binary outcome, i.e. 0 as default, 1 as non-default -> set 'Fully Paid' as 1 and the rest except as 0
+lc_data_subset$loan_status <- ifelse(lc_data_subset$loan_status == 'Fully Paid',1,0)
+lc_data_subset$loan_status <- as.integer(lc_data_subset$loan_status) #integers require less storage space than double
+#take a look at the levels of loan_status (0 = default; 1 = non-default)
+print(loan_status_table <- table(lc_data$loan_status))
+summary(lc_data_subset)
+```
+
+### DATA CLEANING
+Data is cleansed through processes such as filling in missing values or deleting rows with missing data, smoothing the noisy data, or resolving the inconsistencies in the data.
+##### Removing attributes with over 70% of missing values
+As a rule of thumb, when over 70% of the values are missing in a variable, dropping the attribute should be considered. The provided data set contains the following 20 attributes which have more than 70% missing values and have been removed:
+```{r}
+# checking missing value statistics -> show the attributes where >70% of NA's
+# q_na: quantity of NAs; p_na: NA in percentage
+meta_data <- funModeling::df_status(lc_data_subset, print_results = FALSE)
+meta_data_na70 <- meta_data%>%
+  filter(p_na > 70)
+meta_data_na70 <- subset(meta_data_na70, select = c(variable, q_na,
+                                             p_na))
+knitr::kable(meta_data_na70[order(-meta_data_na70$p_na),])
+```
+* Removing variables with more of 70% missing values
+```{r}
+data_cleaned <- lc_data_subset[, -which(colMeans(is.na(lc_data_subset)) > 0.7)] #removed 20 variables
+dim(data_cleaned)
+```
+### DATA REDUCTION
+#### Dimensionality reduction
+Even though Feedforward Neural Networks are good at feature engineering by themselves (by adjusting the weights accordingly) and able to handle multiple dimensions, we still need to do some feature selection based on human knowledge.
+
+##### Removing non-relevevant/redundant variables
+* Removing IDs, desc, url since these have no prediction power (redundant/lack of information)
+```{r}
+data_cleaned <- within(data_cleaned, rm ('X','member_id', 'id', 'desc', 'url')) #removed 5 variables
+dim(data_cleaned)
+```
+##### Removing variables with only one or too many unique values to be relevant
+* Removing policy_code as it has only 1 unique value (all 5 number summary values are the same), therefore can not be used as a meaningful predictor
+```{r}
+# checking 5 number summary -> policy_code is a constant -> it has no prediction power
+summary(data_cleaned$policy_code)
+```
+
+```{r}
+#removing policy_code as it is a constant
+data_cleaned <- within(data_cleaned, rm ('policy_code')) # removed 1 variable
+```
+##### Removing variables where the data quality was very bad:
+It seems "emp_title" and "title" data are coming from free text fields and therefore contain a lot of unique (and sometimes very irrelevant) values. We believe that a nominal variable containing over 45 000 unique values (while our dataset has a length around 256 000) can not be a good predictor for the current classification task, therefore need to be removed.
+```{r}
+# checking categorical attributes -> how many unique values they have
+meta_data <- funModeling::df_status(data_cleaned, print_results = FALSE)
+meta_data_unique <- meta_data%>%
+  filter(type == 'factor')
+meta_data_unique <- subset(meta_data_unique, select = c(variable, type,
+                                             unique))
+knitr::kable(meta_data_unique[order(-meta_data_unique$unique),])
+```
+
+```{r}
+data_cleaned <- within(data_cleaned, rm ('title','emp_title')) # removed 2 variables
+```
+
+### VARIABLE TRANSFORMATION
+#### Transforming qualitative variables
+As some learning algorithms can not process specific variable types (e.g. categorical), these variable types have to be translated into a more useful format. Variables are classified as follows:
+
+* Qualitative (attribute, or categorical) variable: a variable that categorizes or describes an element of a population. Arithmetic operations, such as addition and averaging are not meaningful
+  + Nominal variable: categorizes (or describes, or names) an element of a population.
+  + Ordinal variable: incorporates an ordered position, or ranking.
+
+* Quantitative (numerical) variable: a variable that quantifies an element of a population. Arithmetic operations such as addition and averaging are meaningful
+  + Discrete variable: can assume a countable number of values. Intuitively, a discrete variable can assume values corresponding to isolated points along a line interval. That is, there is a gap between any two values.
+  + Continuous variable: can assume an uncountable number of values. Intuitively, a continuous variable can assume any value along a line interval, including every possible value between any two values.
+  
+Our neural network model can only process numerical data (in a range between 0 and 1), thus we had to examine the categorical data in our dataset. We also had to consider that sometimes R can not automatically recognize the correct variable type, therefore first we checked how our variables were classified by R.
+The normalization (scaling - which is required by the restricted range) will be performed in a later step.
+
+##### One-hot encoding (creating dummy variables)
+* We applied one-hot encoding in order to transform the following nominal attributes into discrete variables:
+```{r}
+library(dummies)
+#one-hot encoding of nominal attributes
+data_cleaned <- dummy.data.frame(data_cleaned, names = c("verification_status", "home_ownership", "purpose", "addr_state") , sep = ".") 
+```
+* 'term' attribute was classified as categorical variable however it contains numerical data stored in text format. Thus we translated it into numerical data for the regression task, but for the neural network we would scale it anyway so we directly encoded it into dummy.
+```{r}
+#numerical data stored in text format
+#encoded into dummy variable as scaling would be neccesary anyway
+data_cleaned$term <- ifelse(data_cleaned$term==" 60 months",1,0)
+data_cleaned$term <- as.integer(data_cleaned$term) #Converting to integer
+print(term_table <- table(data_cleaned$term)) #shows the variable levels
+```
+
+* The used dummy levels to encode the follwoing nominal variables: 
+```{r}
+data_cleaned$initial_list_status <- ifelse(data_cleaned$initial_list_status=="w",1,0)
+data_cleaned$initial_list_status <- as.integer(data_cleaned$initial_list_status) #Converting to integer
+print(initial_list_status_table <- table(data_cleaned$initial_list_status)) #shows the variable levels
+
+levels(data_cleaned$pymnt_plan)
+data_cleaned$pymnt_plan <- ifelse(data_cleaned$pymnt_plan=="y",1,0)
+data_cleaned$pymnt_plan <- as.integer(data_cleaned$pymnt_plan) #Converting to integer
+print(pymnt_plan_table <- table(data_cleaned$pymnt_plan)) #shows the variable levels
+```
+```{r}
+levels(data_cleaned$application_type)
+data_cleaned$application_type <- ifelse(data_cleaned$application_type=="INDIVIDUAL",1,0)
+data_cleaned$application_type <- as.integer(data_cleaned$application_type) #Converting to integer
+print(application_type_table <- table(data_cleaned$application_type))
+```
+##### Encoding ordinal variables
+The following ordinal variables have an underlying natural order therefore we encoded them accordingly.
+
+* We chose to keep Grade and Subgrade predictors and saw that the NN handled this colinearity well as we will see with the accuracy.
+```{r}
+data_cleaned$grade<-factor(data_cleaned$grade, levels = c('A', 'B', 'C','D', 'E','F','G'), labels= c(0,1,2,3,4,5,6))
+data_cleaned$grade <- as.integer(data_cleaned$grade) 
+
+data_cleaned$sub_grade<-factor(data_cleaned$sub_grade, levels = c('A1','A2','A3','A4','A5', 'B1','B2','B3','B4','B5', 'C1','C2','C3','C4','C5', 'D1','D2','D3','D4','D5',
+                                                                    'E1','E2','E3','E4','E5', 'F1','F2','F3','F4','F5', 'G1','G2','G3','G4','G5'), 
+                                                                    labels= c(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,
+                                                                              31,32,33,34))
+data_cleaned$sub_grade <- as.integer(data_cleaned$sub_grade) #Converting to integer
+```
+* The Zip code contains a logic and is not randomly given. This means that they are linked together, after looking [it up] (https://upload.wikimedia.org/wikipedia/commons/thumb/2/24/ZIP_Code_zones.svg/800px-ZIP_Code_zones.svg.png) to reproduce this logic with categories would be too complex and would be out of scope for this project. Therefore we decided to simply erase the "xx" at the end and convert the three first digits.
+```{r}
+data_cleaned$zip_code<-factor(substring(data_cleaned$zip_code,0,3))
+data_cleaned$zip_code <- as.integer(data_cleaned$zip_code) #Converting to integer
+```
+* It makes sense that someone with more employee stability represents a lesser risk and thus obtain a lower interest. Therefore we encoded 'emp_length' variable with respect to the natural order.
+We furthermore noted that 'emp_length' variable contains NAs stored as "n/a" which was not detected by R. As 'emp_length' is a categorical variable instead of transforming those "n/a"-s into a "NA" (which would be automatically recognized by R) we can handle this problem in this encoding step.
+```{r}
+#Encoding 'emp_length': "n/a" -> 0, "< 1 year" -> 0.5, "1 year" -> 1..."10+ years" -> 10
+print(emp_length_table <- table(data_cleaned$emp_length)) #shows the variable levels with the value distribution
+data_cleaned$emp_length<-factor(data_cleaned$emp_length, levels = c('n/a', '< 1 year', '1 year','2 years', '3 years','4 years','5 years',
+                                                                               '6 years','7 years','8 years','9 years','10+ years'), labels= c(0,0.5,1,2,3,4,5,6,7,8,9,10))
+data_cleaned$emp_length <- as.numeric(as.character(data_cleaned$emp_length)) #Converting to double
+print(data_cleaned_table <- table(data_cleaned$emp_length))
+```
+* Convert all date fields to integers
+```{r}
+chr_to_date_vars <- 
+  c("issue_d", "last_pymnt_d", "last_credit_pull_d", "earliest_cr_line")
+data_cleaned %>%
+  select(.dots = chr_to_date_vars) %>%
+  str()
+
+head(unique(data_cleaned$issue_d))
+
+for (i in chr_to_date_vars){
+  print(head(unique(data_cleaned[, i])))
+}
+
+convert_date <- function(x){
+  as.numeric(as.Date(paste0("01-", x), format = "%d-%b-%Y"))
+} 
+
+data_cleaned <-
+  data_cleaned %>%
+  mutate_at(.funs = funs(convert_date), .vars = chr_to_date_vars)
+
+typeof(data_cleaned$issue_d)
+class(data_cleaned$issue_d)
+```
+
+##### Handling remaining NAs - Simple imputation
+
+* By 0s 
+
+Because it could represent something that never happened and considering the predictors, we didn't want to impact the observation negatively
+```{r}
+data_cleaned$mths_since_last_delinq[is.na(data_cleaned$mths_since_last_delinq)] <- 0
+data_cleaned$delinq_2yrs[is.na(data_cleaned$delinq_2yrs)] <- 0
+data_cleaned$acc_now_delinq[is.na(data_cleaned$acc_now_delinq)] <- 0
+data_cleaned$pub_rec[is.na(data_cleaned$pub_rec)] <- 0
+data_cleaned$inq_last_6mths[is.na(data_cleaned$inq_last_6mths)] <- 0
+```
+* By median
+
+Because the entry might have been forgotten and considering the predictors, we chose to replace them with the median value to avoid skewing the predictors. 
+```{r}
+annual_inc_median <- median(data_cleaned$annual_inc, na.rm = TRUE)  
+data_cleaned$annual_inc[is.na(data_cleaned$annual_inc)] <- annual_inc_median
+
+total_acc_median <- median(data_cleaned$total_acc, na.rm = TRUE)  
+data_cleaned$total_acc[is.na(data_cleaned$total_acc)] <- total_acc_median
+
+open_acc_median <- median(data_cleaned$open_acc, na.rm = TRUE)  
+data_cleaned$open_acc[is.na(data_cleaned$open_acc)] <- open_acc_median
+
+earliest_cr_line_median <- median(data_cleaned$earliest_cr_line, na.rm = TRUE)  
+data_cleaned$earliest_cr_line[is.na(data_cleaned$earliest_cr_line)] <- earliest_cr_line_median
+
+last_pymnt_d_median <- median(data_cleaned$last_pymnt_d, na.rm = TRUE)  
+data_cleaned$last_pymnt_d[is.na(data_cleaned$last_pymnt_d)] <- last_pymnt_d_median
+
+revol_util_median <- median(data_cleaned$revol_util, na.rm = TRUE)  
+data_cleaned$revol_util[is.na(data_cleaned$revol_util)] <- revol_util_median
+
+last_credit_pull_d_median <- median(data_cleaned$last_credit_pull_d, na.rm = TRUE)  
+data_cleaned$last_credit_pull_d[is.na(data_cleaned$last_credit_pull_d)] <- last_credit_pull_d_median
+
+collections_12_mths_ex_med_median <- median(data_cleaned$collections_12_mths_ex_med, na.rm = TRUE)  
+data_cleaned$collections_12_mths_ex_med[is.na(data_cleaned$collections_12_mths_ex_med)] <- collections_12_mths_ex_med_median
+
+tot_coll_amt_median <- median(data_cleaned$tot_coll_amt, na.rm = TRUE)  
+data_cleaned$tot_coll_amt[is.na(data_cleaned$tot_coll_amt)] <- tot_coll_amt_median
+
+tot_cur_bal_median <- median(data_cleaned$tot_cur_bal, na.rm = TRUE)  
+data_cleaned$tot_cur_bal[is.na(data_cleaned$tot_cur_bal)] <- tot_cur_bal_median
+
+total_rev_hi_lim_median <- median(data_cleaned$total_rev_hi_lim, na.rm = TRUE)  
+data_cleaned$total_rev_hi_lim[is.na(data_cleaned$total_rev_hi_lim)] <- total_rev_hi_lim_median
+dim(data_cleaned)
+
+```
+### DATA CLEANING 
+#### HANDLING OUTLIERS
+During data analysis phase we noticed some outliers, that some nurses declared making more 9 Million $ followed by truck driver with 8.9 Million. We found that very suspicious and wanted to delete the 5% lowest and highest values. But not far behind where plausible entries, so we decided to find more refined ways to handle outliers.
+We tried handling the outliers with the [IQR method](https://www.r-bloggers.com/2020/01/how-to-remove-outliers-in-r/), unfortunately it would have modified for more then >122K observations. This means that the data was skewed. 
+For us this had a too big reduction on the number of observations, we thus decided to use the [winsorization technique](https://www.r-bloggers.com/2011/06/winsorization/). This helps keeping all the observations and just replaces the outlier variables with the median value. We left the parameters by default which adapt the 5% lowest and highest values of each variables like we wanted to do at the begining.
+```{r}
+#Find and treat outliers -> winsorizing: replace extreme values by less extreme ones
+library(DescTools)
+data_cleaned <- Winsorize(data_cleaned, na.rm=TRUE)
+```
+### Transform the Dataset to a Matrix
+```{r}
+class(data_cleaned) # "data.frame", which is not suitable for NN Neural Network, has to be a matrix
+data_cleaned_M <- data.matrix(data_cleaned)
+class(data_cleaned_M) #  1. "matrix", now suitable for NN
+dim(data_cleaned_M)
+# Set `dimnames` to "NULL". ensures that there are no column names in the data.
+dimnames(data_cleaned_M) <- NULL
+```
+
+## Build the NN Model
+
+### DIVIDING DATASET INTO SUBSETS FOR INPUT(X) & OUTPUT (Y) : TEST & TRAINING SETS
+```{r}
+loan_status_index <- which(colnames(data_cleaned) == "loan_status")
+loan_status_index_plus1 <- loan_status_index + 1
+loan_status_index_minus1 <- loan_status_index - 1
+
+dataset_default <- data_cleaned_M
+
+# Determine sample size
+ind <- sample(2, nrow(dataset_default), replace=TRUE, prob=c(0.67, 0.33))
+# Split the  dataset_default into "training" and "test"
+train_x <- dataset_default[ind==1, c(1:loan_status_index_minus1, loan_status_index_plus1:ncol(dataset_default))]
+test_x <- dataset_default[ind==2, c(1:loan_status_index_minus1, loan_status_index_plus1:ncol(dataset_default))]
+#Export the datasets
+write.csv(train_x, "classificationTrainigDataSet.CSV", row.names=FALSE)
+write.csv(test_x, "classificationTestDataSet.CSV", row.names=FALSE)
+
+train_y <- dataset_default[ind==1, c(loan_status_index)] #y, "loan_status"
+test_y <- dataset_default[ind==2, c(loan_status_index)]#y, "loan_status"
+```
+
+#### Normalizing the Data sets
+* Normalization to training and test dataset to values between 0 and 1 included
+```{r}
+mean <- apply(train_x, 2, mean)
+std <- apply(train_x, 2, sd)
+train_x <- scale(train_x, center = mean, scale = std)
+test_x <- scale(test_x,center = mean, scale = std)
+```
+* Normalization not needed for the output variable, Y which is either Os or 1s.
+
+### Selecting the network type to the task
+Feed Forward, Convolutional and Recurrent are three popular network types.  Criteria for using a Recurrent Network includes a temporal (eg time series, movement) aspect along with an order or arrangement, often with a physicality or physical orientation (eg a verb being at the start and/or at the end of a sentence in German.  Stages of a cell life cycle. Position of chemical elements in the periodic tablet based on their valency of electrons and oxidative status). Hence, Recurrent Network were excluded for Assignment 2. Likewise, CNN were also excluded for Assignment 2 since the Lending Club data set did not display any order or arrangement as described earlier.  For example, switching the column position in the data set had no consequences nor meaning.  Not surprisingly, CNN are used for image classification since there is an order or arrangement among the image features.   By applying exclusion criteria, Group B10 decided to use Feed Forward Network for their Assignment 2.  On reflection, a key insight was the use of exclusion criteria for decision making on the choice of Neural Networks rather than using an inclusion criterion which is often used in life sciences.  For example, inclusion criteria are used for patient recruitment into clinical trials or patient eligibility for expensive treatments.   
+
+### K-Fold Validation (with K = 10) to find the best hyperparameters for the Network
+To evaluate our network while we keep adjusting its parameters (such as the number of epochs used for training), we simply spitted the data into a training set and a validation set. However, because we have so few data points, the validation set ended up being small (84848 observations). A consequence is that our validation scores may change a lot depending on which data points we choose to use for validation and which we choose for training, i.e. the validation scores may have a high variance with regard to the validation split. This would prevent us from reliably evaluating our model.
+The best practice in such situations is to use K-fold cross-validation. It consists of splitting the available data into K partitions, then instantiating K identical models, and training each one on K-1 partitions while evaluating on the remaining partition. The validation score for the model used would then be the average of the K validation scores obtained.
+
+We explored the following hyperparameters in this project:
+
+* The problem type (Binary Classification of Defaulter vs Non – Defaulter) determines that the output layer's activation function should be Sigmoid (for the hidden layers we used ReLU which is one of the most popular non-linear function) and the Loss Function should be Binary_Crossentropy.
+* Optimizers: are used to update the weights through backpropagation (an learning cycles) in our network, each of them have its own advantages and disadvantages: e.g. Gradient Descent/Stochastic Gradient Descent and Momentum are tend to be less fast than RMSProp and Adam (momentum is usually faster than gradient descent), however their converge quality is usually better (they find the global minimum or an acceptable local minimum with better chance).
+* Batch-size: determines the frequency of updates. The smaller the batches, the more, and the quicker are the updates. The larger the batch size, the more accurate the gradient of the cost will be with respect to the parameters, however according to some researchers large batch sizes can hurt the model’s ability to generalize. The stochastic method selects the samples in the batch by random.
+* Learning rate: with using a too small learning rate the learning can be very slow and the network might won't be able to reach its full potential. However using a too big learning can lead to jump over the global minimum. Therefore we tried out different learning rates and also optimizers with adapting learning rates.
+* Epochs: number of iterations - length of the training
+* Number of neurons and hidden layers - hidden layers perform nonlinear transformations of the inputs entered into the network, complex especially non-linearly separable problems require bigger/more complex networks in order to be able to learn the underlying pattern/logic from the data. In deep networks the hidden layers closer to the output layer are more specific than the ones closer to the input layer. However building a deep network would have been out of scope for the project we explored some different architecture and we included some of them in this report. 
+
+#### Network Design with K-Fold - Model_1 
+k=10, epochs=50, batch_size=512, optimizer=rmsprop (lr=0.001, rho = 0.9)
+```{r}
+k <- 10 # We use 10-folds
+indices <- sample(1:nrow(train_x))
+folds <- cut(indices, breaks = k, labels = FALSE)
+
+num_epochs <- 50 
+all_scores <- c()  # this clears all previous content eg "mae"
+all_accuracy_histories <- NULL
+batch_size <- 512 
+for (i in 1:k) {           # Start of the Loop
+  cat("processing fold #", i, "\n")
+  cat("    prepare data for fold #", i, "\n")
+  val_indices <- which(folds == i, arr.ind = TRUE) 
+  val_data <- train_x[val_indices,] 
+  val_targets <- train_y[val_indices]
+  
+  # Prepare the training data: data from all other partitions
+  partial_train_data <- train_x[-val_indices,] 
+  partial_train_targets <- train_y[-val_indices]
+  x_val <-  train_x[val_indices,] 
+  y_val <- train_y[val_indices]
+    
+  # Build the Keras model
+  cat("    build model for fold #", i, "\n")
+  model <- keras_model_sequential()%>%
+      layer_dense(units = 16, activation ="relu", input_shape = ncol(train_x))%>%
+      layer_dense(units = 16, activation ="relu")%>%
+      layer_dense(units = 1, activation ="sigmoid") #sigmoid preferred for binary classification
+  # Compile the Model. Need to pick a loss function & an Optimizer
+  # with the single output layer with a sigmoid activation, best to use "binary cross entropy" loss.
+  model %>% compile(
+      optimizer = "rmsprop", # default learning rate lr. RMSprop (Root Mean Square Propagation) is a gradient based optimization technique used in training neural networks.
+      loss = "binary_crossentropy",
+      metrics = c ("accuracy")) 
+  
+  # (FIT THE MODEL) Train the model (in silent mode, verbose=0)
+  cat("    train model for fold #", i, "\n")
+  model %>% fit(partial_train_data, partial_train_targets,
+                  epochs = num_epochs, batch_size = batch_size, verbose = 0,
+                  validation_data = list(x_val, y_val))  
+  
+  cat("    evaluate model for fold #", i, "\n")
+  results <- model %>% evaluate(val_data, val_targets, verbose = 0)
+  
+  all_scores <- c(all_scores, results["accuracy"])
+  
+  cat("...history named model for fold #", i, "\n")
+  history <- model %>% fit(
+    partial_train_data, partial_train_targets,
+    epochs = num_epochs, batch_size = 512, verbose = 0,
+    validation_data = list(x_val, y_val)) 
+  history
+  str(history)
+  
+  all_accuracy_histories <- rbind(all_accuracy_histories, history$metrics$accuracy)
+  
+}  # End of Loop
+plot(history)
+all_accuracy_histories
+all_scores # of accuracy
+mean(all_scores) # of accuracy
+```
+
+####Network Design with K-Fold - Model_2
+* k=10, epochs=50, batch_size=512, optimizer=sgd (learning rate=0.01)
+```{r}
+k <- 10 # We use 10-folds
+indices <- sample(1:nrow(train_x))
+folds <- cut(indices, breaks = k, labels = FALSE)
+
+num_epochs <- 50 
+all_scores <- c()  # this clears all previous content eg "mae"
+all_accuracy_histories <- NULL
+batch_size <- 512
+opt <- optimizer_sgd(
+  lr = 0.01,
+  momentum = 0,
+  decay = 0,
+  nesterov = FALSE,
+  clipnorm = NULL,
+  clipvalue = NULL
+)
+
+for (i in 1:k) {           # Start of the Loop
+  cat("processing fold #", i, "\n")
+  cat("    prepare data for fold #", i, "\n")
+  val_indices <- which(folds == i, arr.ind = TRUE) 
+  val_data <- train_x[val_indices,] 
+  val_targets <- train_y[val_indices]
+  
+  # Prepare the training data: data from all other partitions
+  partial_train_data <- train_x[-val_indices,] 
+  partial_train_targets <- train_y[-val_indices]
+  x_val <-  train_x[val_indices,] 
+  y_val <- train_y[val_indices]
+    
+  # Build the Keras model
+  cat("    build model for fold #", i, "\n")
+  model <- keras_model_sequential()%>%
+      layer_dense(units = 16, activation ="relu", input_shape = ncol(train_x))%>%
+      layer_dense(units = 16, activation ="relu")%>%
+      layer_dense(units = 1, activation ="sigmoid") #sigmoid preferred for binary classification
+  # Compile the Model. Need to pick a loss function & an Optimizer
+  # with the single output layer with a sigmoid activation, best to use "binary cross entropy" loss.
+  model %>% compile(
+      optimizer = opt, # Stochastic Gradient Descent is a gradient based optimization technique used in training neural networks.
+      loss = "binary_crossentropy",
+      metrics = c ("accuracy")) 
+  
+  # (FIT THE MODEL) Train the model (in silent mode, verbose=0)
+  cat("    train model for fold #", i, "\n")
+  model %>% fit(partial_train_data, partial_train_targets,
+                  epochs = num_epochs, batch_size = batch_size, verbose = 0,
+                  validation_data = list(x_val, y_val))  
+  
+  cat("    evaluate model for fold #", i, "\n")
+  results <- model %>% evaluate(val_data, val_targets, verbose = 0)
+  
+  all_scores <- c(all_scores, results["accuracy"])
+  
+  cat("...history named model for fold #", i, "\n")
+  history <- model %>% fit(
+    partial_train_data, partial_train_targets,
+    epochs = num_epochs, batch_size = 512, verbose = 0,
+    validation_data = list(x_val, y_val)) 
+  history
+  str(history)
+  
+  all_accuracy_histories <- rbind(all_accuracy_histories, history$metrics$accuracy)
+  
+}  # End of Loop
+plot(history)
+all_accuracy_histories
+all_scores # of accuracy
+mean(all_scores) # of accuracy
+```
+
+####Network Design with K-Fold - Model_3
+* k=10, epochs=20, batch_size=512, optimizer=sgd with momentum (learning rate=0.01, momentum=0.9)
+```{r}
+k <- 10 # We use 10-folds
+indices <- sample(1:nrow(train_x))
+folds <- cut(indices, breaks = k, labels = FALSE)
+
+num_epochs <- 20 
+all_scores <- c()  # this clears all previous content eg "mae"
+all_accuracy_histories <- NULL
+batch_size <- 512
+opt <- optimizer_sgd(
+  lr = 0.01,
+  momentum = 0.9,
+  decay = 0,
+  nesterov = FALSE,
+  clipnorm = NULL,
+  clipvalue = NULL
+)
+
+for (i in 1:k) {           # Start of the Loop
+  cat("processing fold #", i, "\n")
+  cat("    prepare data for fold #", i, "\n")
+  val_indices <- which(folds == i, arr.ind = TRUE) 
+  val_data <- train_x[val_indices,] 
+  val_targets <- train_y[val_indices]
+  
+  # Prepare the training data: data from all other partitions
+  partial_train_data <- train_x[-val_indices,] 
+  partial_train_targets <- train_y[-val_indices]
+  x_val <-  train_x[val_indices,] 
+  y_val <- train_y[val_indices]
+    
+  # Build the Keras model
+  cat("    build model for fold #", i, "\n")
+  model <- keras_model_sequential()%>%
+      layer_dense(units = 16, activation ="relu", input_shape = ncol(train_x))%>%
+      layer_dense(units = 16, activation ="relu")%>%
+      layer_dense(units = 1, activation ="sigmoid") #sigmoid preferred for binary classification
+  # Compile the Model. Need to pick a loss function & an Optimizer
+  # with the single output layer with a sigmoid activation, best to use "binary cross entropy" loss.
+  model %>% compile(
+      optimizer = opt, # Momentum is a gradient based optimization technique used in training neural networks.
+      loss = "binary_crossentropy",
+      metrics = c ("accuracy")) 
+  
+  # (FIT THE MODEL) Train the model (in silent mode, verbose=0)
+  cat("    train model for fold #", i, "\n")
+  model %>% fit(partial_train_data, partial_train_targets,
+                  epochs = num_epochs, batch_size = batch_size, verbose = 0,
+                  validation_data = list(x_val, y_val))  
+  
+  cat("    evaluate model for fold #", i, "\n")
+  results <- model %>% evaluate(val_data, val_targets, verbose = 0)
+  
+  all_scores <- c(all_scores, results["accuracy"])
+  
+  cat("...history named model for fold #", i, "\n")
+  history <- model %>% fit(
+    partial_train_data, partial_train_targets,
+    epochs = num_epochs, batch_size = 512, verbose = 0,
+    validation_data = list(x_val, y_val)) 
+  history
+  str(history)
+  
+  all_accuracy_histories <- rbind(all_accuracy_histories, history$metrics$accuracy)
+  
+}  # End of Loop
+plot(history)
+all_accuracy_histories
+all_scores # of accuracy
+mean(all_scores) # of accuracy
+
+```
+
+####Network Design with K-Fold - Model_4
+* k=10, epochs=20, batch_size=512, optimizer=adam (learning rate=0.001, beta_1=0.9, beta_2 = 0.999)
+```{r}
+k <- 10 # We use 10-folds
+indices <- sample(1:nrow(train_x))
+folds <- cut(indices, breaks = k, labels = FALSE)
+
+num_epochs <- 20 
+all_scores <- c()  # this clears all previous content eg "mae"
+all_accuracy_histories <- NULL
+batch_size <- 512
+opt <- optimizer_adam(
+  lr = 0.001,
+  beta_1 = 0.9,
+  beta_2 = 0.999,
+  epsilon = NULL,
+  decay = 0,
+  amsgrad = FALSE,
+  clipnorm = NULL,
+  clipvalue = NULL
+)
+
+for (i in 1:k) {           # Start of the Loop
+  cat("processing fold #", i, "\n")
+  cat("    prepare data for fold #", i, "\n")
+  val_indices <- which(folds == i, arr.ind = TRUE) 
+  val_data <- train_x[val_indices,] 
+  val_targets <- train_y[val_indices]
+  
+  # Prepare the training data: data from all other partitions
+  partial_train_data <- train_x[-val_indices,] 
+  partial_train_targets <- train_y[-val_indices]
+  x_val <-  train_x[val_indices,] 
+  y_val <- train_y[val_indices]
+    
+  # Build the Keras model
+  cat("    build model for fold #", i, "\n")
+  model <- keras_model_sequential()%>%
+      layer_dense(units = 16, activation ="relu", input_shape = ncol(train_x))%>%
+      layer_dense(units = 16, activation ="relu")%>%
+      layer_dense(units = 1, activation ="sigmoid") #sigmoid preferred for binary classification
+  # Compile the Model. Need to pick a loss function & an Optimizer
+  # with the single output layer with a sigmoid activation, best to use "binary cross entropy" loss.
+  model %>% compile(
+      optimizer = opt, # Adam combines RMSProp and Momentum.
+      loss = "binary_crossentropy",
+      metrics = c ("accuracy")) 
+  
+  # (FIT THE MODEL) Train the model (in silent mode, verbose=0)
+  cat("    train model for fold #", i, "\n")
+  model %>% fit(partial_train_data, partial_train_targets,
+                  epochs = num_epochs, batch_size = batch_size, verbose = 0,
+                  validation_data = list(x_val, y_val))  
+  
+  cat("    evaluate model for fold #", i, "\n")
+  results <- model %>% evaluate(val_data, val_targets, verbose = 0)
+  
+  all_scores <- c(all_scores, results["accuracy"])
+  
+  cat("...history named model for fold #", i, "\n")
+  history <- model %>% fit(
+    partial_train_data, partial_train_targets,
+    epochs = num_epochs, batch_size = 512, verbose = 0,
+    validation_data = list(x_val, y_val)) 
+  history
+  str(history)
+  
+  all_accuracy_histories <- rbind(all_accuracy_histories, history$metrics$accuracy)
+  
+}  # End of Loop
+plot(history)
+all_accuracy_histories
+all_scores # of accuracy
+mean(all_scores) # of accuracy
+```
+
+##### Changing parameters: add more layers and more neurons and estimate the number of epochs is 20 and try the model.
+```{r}
+k <- 10 # We use 10-folds
+indices <- sample(1:nrow(train_x))
+folds <- cut(indices, breaks = k, labels = FALSE)
+
+num_epochs <- 20 # 20 was used in the IMDB Case Study. We found out that 4 Epochs performed better then 20.
+all_scores <- c()  # this clears all previous content eg "mae"
+all_accuracy_histories <- NULL
+batch_size <- 512 
+for (i in 1:k) {           # Start of the Loop
+  cat("processing fold #", i, "\n")
+  cat("    prepare data for fold #", i, "\n")
+  val_indices <- which(folds == i, arr.ind = TRUE) 
+  val_data <- train_x[val_indices,] 
+  val_targets <- train_y[val_indices]
+  
+  # Prepare the training data: data from all other partitions
+  partial_train_data <- train_x[-val_indices,] 
+  partial_train_targets <- train_y[-val_indices]
+  x_val <-  train_x[val_indices,] 
+  y_val <- train_y[val_indices]
+    
+  # Build the Keras model
+  cat("    build model for fold #", i, "\n")
+  model <- keras_model_sequential()%>%
+      layer_dense(units = 64, activation ="relu", input_shape = ncol(train_x))%>%
+      layer_dense(units = 32, activation ="relu")%>%
+      layer_dense(units = 16, activation ="relu")%>%
+      layer_dense(units = 1, activation ="sigmoid") #sigmoid preferred for binary classification
+  # Compile the Model. Need to pick a loss function & an Optimizer
+  # with the single output layer with a sigmoid activation, best to use "binary cross entropy" loss. 
+  model %>% compile(
+      optimizer = "rmsprop", # default learning rate lr. RMSprop (Root Mean Square Propagation) is a gradient based optimization technique used in training neural networks.
+      loss = "binary_crossentropy",
+      metrics = c ("accuracy")) 
+  
+  # (FIT THE MODEL) Train the model (in silent mode, verbose=0)
+  cat("    train model for fold #", i, "\n")
+  model %>% fit(partial_train_data, partial_train_targets,
+                  epochs = num_epochs, batch_size = batch_size, verbose = 0,
+                  validation_data = list(x_val, y_val))  
+  
+  cat("    evaluate model for fold #", i, "\n")
+  results <- model %>% evaluate(val_data, val_targets, verbose = 0)
+  
+  all_scores <- c(all_scores, results["accuracy"])
+  
+  cat("...history named model for fold #", i, "\n")
+  history <- model %>% fit(
+    partial_train_data, partial_train_targets,
+    epochs = num_epochs, batch_size = 512, verbose = 0,
+    validation_data = list(x_val, y_val)) 
+  history
+  str(history)
+  
+  all_accuracy_histories <- rbind(all_accuracy_histories, history$metrics$accuracy)
+  
+}  # End of Loop
+plot(history)
+all_accuracy_histories
+all_scores # of accuracy
+mean(all_scores) # of accuracy
+```
+##### Change the batch size to 256 with 10 epochs, according to the above graph we estimated to use 10 epochs, after which the accuracy is going down
+```{r}
+k <- 10 # We use 10-folds
+indices <- sample(1:nrow(train_x))
+folds <- cut(indices, breaks = k, labels = FALSE)
+
+num_epochs <- 10 
+all_scores <- c()  # this clears all previous content eg "mae"
+all_accuracy_histories <- NULL
+batch_size <- 256 
+for (i in 1:k) {           # Start of the Loop
+  cat("processing fold #", i, "\n")
+  cat("    prepare data for fold #", i, "\n")
+  val_indices <- which(folds == i, arr.ind = TRUE) 
+  val_data <- train_x[val_indices,] 
+  val_targets <- train_y[val_indices]
+  
+  # Prepare the training data: data from all other partitions
+  partial_train_data <- train_x[-val_indices,] 
+  partial_train_targets <- train_y[-val_indices]
+  x_val <-  train_x[val_indices,] 
+  y_val <- train_y[val_indices]
+    
+  # Build the Keras model
+  cat("    build model for fold #", i, "\n")
+  model <- keras_model_sequential()%>%
+      layer_dense(units = 16, activation ="relu", input_shape = ncol(train_x))%>%
+      layer_dense(units = 16, activation ="relu")%>%
+      layer_dense(units = 1, activation ="sigmoid") #sigmoid is preferred for binary classification
+  # Compile the Model. Need to pick a loss function & an Optimizer
+  # with the single output layer with a sigmoid activation, best to use "binary cross entropy" loss.
+  model %>% compile(
+      optimizer = "rmsprop", # default learning rate lr. RMSprop (Root Mean Square Propagation) is a gradient based optimization technique used in training neural networks.
+      loss = "binary_crossentropy",
+      metrics = c ("accuracy")) 
+  
+  # (FIT THE MODEL) Train the model (in silent mode, verbose=0)
+  cat("    train model for fold #", i, "\n")
+  model %>% fit(partial_train_data, partial_train_targets,
+                  epochs = num_epochs, batch_size = batch_size, verbose = 0,
+                  validation_data = list(x_val, y_val))  
+  
+  cat("    evaluate model for fold #", i, "\n")
+  results <- model %>% evaluate(val_data, val_targets, verbose = 0)
+  
+  all_scores <- c(all_scores, results["accuracy"])
+  
+  cat("...history named model for fold #", i, "\n")
+  history <- model %>% fit(
+    partial_train_data, partial_train_targets,
+    epochs = num_epochs, batch_size = 256, verbose = 0,
+    validation_data = list(x_val, y_val)) 
+  history
+  str(history)
+  
+  all_accuracy_histories <- rbind(all_accuracy_histories, history$metrics$accuracy)
+
+}  # End of Loop
+plot(history)
+all_accuracy_histories
+all_scores # of accuracy
+mean(all_scores) # of accuracy
+```
+
+#### Tweaking the model
+Before going to train the final model, after trying multiple changes in the hyper parameters, we estimated the optimal number of epochs would be 5 and train the model with the parameters, after which there would not be any difference in improvement in accuracy.
+Training the model with training data
+```{r}
+k <- 10 # We use 10-folds
+indices <- sample(1:nrow(train_x))
+folds <- cut(indices, breaks = k, labels = FALSE)
+
+num_epochs <- 5 
+all_scores <- c()  # this clears all previous content eg "mae"
+all_accuracy_histories <- NULL
+batch_size <- 512 
+for (i in 1:k) {           # Start of the Loop
+  cat("processing fold #", i, "\n")
+  cat("    prepare data for fold #", i, "\n")
+  val_indices <- which(folds == i, arr.ind = TRUE) 
+  val_data <- train_x[val_indices,] 
+  val_targets <- train_y[val_indices]
+  
+  # Prepare the training data: data from all other partitions
+  partial_train_data <- train_x[-val_indices,] 
+  partial_train_targets <- train_y[-val_indices]
+  x_val <-  train_x[val_indices,] 
+  y_val <- train_y[val_indices]
+    
+  # Build the Keras model
+  cat("    build model for fold #", i, "\n")
+  model <- keras_model_sequential()%>%
+      layer_dense(units = 16, activation ="relu", input_shape = ncol(train_x))%>%
+      layer_dense(units = 16, activation ="relu")%>%
+      layer_dense(units = 1, activation ="sigmoid") #sigmoid perfered for binary classification
+  # Compile the Model. Need to pick a loss function & an Optimiser
+  # with the single output layer with a sigmoid activation, best to use "binary cross entropy" loss.
+  model %>% compile(
+      optimizer = "rmsprop", # default learning rate lr. RMSprop (Root Mean Square Propagation) is a gradient based optimization technique used in training neural networks.
+      loss = "binary_crossentropy",
+      metrics = c ("accuracy")) 
+  
+  # (FIT THE MODEL) Train the model (in silent mode, verbose=0)
+  cat("    train model for fold #", i, "\n")
+  model %>% fit(partial_train_data, partial_train_targets,
+                  epochs = num_epochs, batch_size = batch_size, verbose = 0,
+                  validation_data = list(x_val, y_val))  
+  
+  cat("    evaluate model for fold #", i, "\n")
+  results <- model %>% evaluate(val_data, val_targets, verbose = 0)
+  
+  all_scores <- c(all_scores, results["accuracy"])
+  
+  cat("...history named model for fold #", i, "\n")
+  history <- model %>% fit(
+    partial_train_data, partial_train_targets,
+    epochs = num_epochs, batch_size = 512, verbose = 0,
+    validation_data = list(x_val, y_val)) 
+  history
+  str(history)
+  
+  all_accuracy_histories <- rbind(all_accuracy_histories, history$metrics$accuracy)
+  
+ 
+}  # End of Loop
+```
+#### Validating the model 
+We validate that model is usable and thus has low loss and high accuracy on the 5th Epoch.
+```{r}
+plot(history)
+all_accuracy_histories
+all_scores # of accuracy
+mean(all_scores) # of accuracy
+```
+* To check the validity of our architecture we create a new model and generate a confusion Matrix associated with it's predictions. We can see that the accuracy is quite similar than the previous model with validation data. This is the model that will be exported
+```{r}
+## Testing of the final "Production" model (in test_x and test_y data)# Get a fresh, complied model
+model_production <- keras_model_sequential()%>%
+  layer_dense(units = 16, activation ="relu", input_shape = ncol(train_x))%>%
+  layer_dense(units = 16, activation ="relu")%>%
+  layer_dense(units = 1, activation ="sigmoid") #sigmoid preferred for binary classification
+# Compile the Model. Need to pick a loss function & an Optimizer
+# with the single output layer with a sigmoid activation, best to use "binary cross entropy" loss.
+model_production %>% compile(
+  optimizer = "rmsprop", # default learning rate lr. RMSprop ((Root Mean Square Propagation)) is a gradient based optimization technique used in training neural networks.
+  loss = "binary_crossentropy",
+  metrics = c("accuracy", "Precision", "Recall", "TruePositives", "TrueNegatives", "FalsePositives", "FalseNegatives"))
+
+# Train Production Model on the entirety of the training data (train_x & train_y)
+# num_epochs <- 5 as per K fold validation results, 
+model_production %>% fit(train_x, train_y,
+              epochs = 5, batch_size = 512, verbose = 0)
+
+```
+
+* As we could see at the beginning, we had an unbalanced class problem in our dataset, we had more sample for the "Fully Paid" class (1), than for the "Defaulted" (0). It could generate high cost for the Lending Club if we miss-classified the "Defaulted" as "Fully Paid" and based on that they would grant credit to this clientele - so we needed to make sure to deliver high accuracy for the minority class, too. To confirm that the model performs well for our interest of class, we calculated the falsely classified "Defaulted" loan percentage with respect to the true "Defaulted": 2.79% which is an acceptable value compared to the overall accuracy of the model. The precision, accuracy, recall and sensitivity values are all very high on the test set, indicating a good model which is able to generalize and find the data points of interests in the dataset (learning the underlying logic/pattern).
+```{r}
+#prediction 
+pred <- model_production %>% predict(test_x)
+pred_y = round(pred)
+confusionMatrix(as.factor(pred_y), as.factor(test_y)) #Confusion matrix
+
+#evaluation
+results_production <- model_production %>% evaluate(test_x, test_y, verbose = 1)
+results_production
+ 
+print(Percentage_Falsely_Classified_Default <- round(c(results_production[["false_positives"]])*100/(c(results_production[["false_positives"]] +results_production[["true_negatives" ]])),3))
+
+print(Percentage_Falsely_Classified_Total <- round(c(results_production[["false_positives"]] + results_production[["false_negatives"]])*100/(c(results_production[["false_positives"]] + results_production[["false_negatives"]] + results_production[["true_negatives" ]] + results_production[["true_positives" ]])),3))
+
+
+save(model_production, file = "classificationModel.RDS")#Saving model
+```
+# Classification Model Conclusion
