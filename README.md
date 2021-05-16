@@ -1,4 +1,6 @@
-## Lending Club interest rate and loan default prediction
+# lending-club
+
+**Lending Club interest rate and loan default prediction**
 
 *University project in R*
 
